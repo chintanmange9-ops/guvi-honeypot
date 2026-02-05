@@ -54,6 +54,10 @@ async def detailed_health():
 conversation_sessions = {}  # Stores conversation history by session ID
 ip_session_mapping = {}     # Maps client IPs to session IDs for continuity
 
+# Rate limiting storage
+request_timestamps = {}
+RATE_LIMIT_SECONDS = 2  # Minimum 2 seconds between requests
+
 async def log_conversation(session_id: str, role: str, message: str):
     """
     Log conversation messages to JSON files organized by date.
@@ -455,6 +459,23 @@ async def catch_all(request: Request, path: str = "", x_api_key: Optional[str] =
         # Get client IP for session continuity
         client_ip = request.client.host if request.client else "unknown"
         
+        # Rate limiting to prevent infinite loops
+        current_time = datetime.utcnow().timestamp()
+        if client_ip in request_timestamps:
+            time_since_last = current_time - request_timestamps[client_ip]
+            if time_since_last < RATE_LIMIT_SECONDS:
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "status": "success",
+                        "reply": "Please wait a moment before sending another message.",
+                        "rate_limited": True
+                    },
+                    headers={"Access-Control-Allow-Origin": "*"}
+                )
+        
+        request_timestamps[client_ip] = current_time
+        
         # Extract message text from various possible formats
         message = ""
         if isinstance(message_obj, dict):
@@ -473,6 +494,22 @@ async def catch_all(request: Request, path: str = "", x_api_key: Optional[str] =
         
         # Get or create session for conversation continuity
         actual_session_id = get_or_create_session_for_ip(client_ip, session_id)
+        
+        # Prevent duplicate message processing
+        if actual_session_id in conversation_sessions:
+            recent_messages = conversation_sessions[actual_session_id]["conversation_history"][-3:]
+            for recent_msg in recent_messages:
+                if recent_msg.get("message") == message and recent_msg.get("role") == "scammer":
+                    # Return previous response to avoid processing duplicate
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "status": "success",
+                            "reply": "I already responded to this message. Please continue the conversation.",
+                            "duplicate_detected": True
+                        },
+                        headers={"Access-Control-Allow-Origin": "*"}
+                    )
         
         # Process conversation history if provided (PS-2 format)
         if conversation_history:
@@ -548,6 +585,36 @@ async def catch_all(request: Request, path: str = "", x_api_key: Optional[str] =
         
         # Check if ready for GUVI callback
         history = get_conversation_history(actual_session_id)
+        
+        # Prevent infinite loops - limit conversation turns
+        MAX_CONVERSATION_TURNS = 15
+        current_turns = len(history)
+        
+        if current_turns >= MAX_CONVERSATION_TURNS:
+            # End conversation and send GUVI callback
+            if is_scam and extracted_intelligence:
+                total_messages = len(history)
+                agent_notes = f"Conversation ended after {total_messages} turns. Intelligence extracted successfully."
+                
+                # Send GUVI callback
+                asyncio.create_task(send_guvi_callback(
+                    actual_session_id,
+                    True,  # scam_detected
+                    total_messages,
+                    extracted_intelligence,
+                    agent_notes
+                ))
+            
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "success",
+                    "reply": "Thank you for the information. I need to verify this with my bank first.",
+                    "conversation_ended": True,
+                    "reason": "Maximum conversation turns reached"
+                },
+                headers={"Access-Control-Allow-Origin": "*"}
+            )
         total_messages = len(history)
         
         # Send GUVI callback after sufficient engagement
