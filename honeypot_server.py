@@ -492,6 +492,18 @@ async def catch_all(request: Request, path: str = "", x_api_key: Optional[str] =
         if not message:
             message = raw_text or "No message"
         
+        # Emergency stop mechanism for testing loops
+        if "EMERGENCY_STOP" in message.upper() or "STOP_TEST" in message.upper():
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "success",
+                    "reply": "Emergency stop activated. Testing loop terminated.",
+                    "emergency_stop": True
+                },
+                headers={"Access-Control-Allow-Origin": "*"}
+            )
+        
         # Get or create session for conversation continuity
         actual_session_id = get_or_create_session_for_ip(client_ip, session_id)
         
@@ -586,15 +598,15 @@ async def catch_all(request: Request, path: str = "", x_api_key: Optional[str] =
         # Check if ready for GUVI callback
         history = get_conversation_history(actual_session_id)
         
-        # Prevent infinite loops - limit conversation turns
-        MAX_CONVERSATION_TURNS = 15
+        # Prevent infinite loops - limit conversation turns (AGGRESSIVE)
+        MAX_CONVERSATION_TURNS = 8  # Reduced from 15 to 8
         current_turns = len(history)
         
         if current_turns >= MAX_CONVERSATION_TURNS:
-            # End conversation and send GUVI callback
+            # End conversation immediately and send GUVI callback
             if is_scam and extracted_intelligence:
                 total_messages = len(history)
-                agent_notes = f"Conversation ended after {total_messages} turns. Intelligence extracted successfully."
+                agent_notes = f"Conversation terminated after {total_messages} turns to prevent infinite loop. Intelligence extracted successfully."
                 
                 # Send GUVI callback
                 asyncio.create_task(send_guvi_callback(
@@ -605,13 +617,17 @@ async def catch_all(request: Request, path: str = "", x_api_key: Optional[str] =
                     agent_notes
                 ))
             
+            # Clear session to prevent further processing
+            if actual_session_id in conversation_sessions:
+                del conversation_sessions[actual_session_id]
+            
             return JSONResponse(
                 status_code=200,
                 content={
                     "status": "success",
-                    "reply": "Thank you for the information. I need to verify this with my bank first.",
+                    "reply": "I need to verify this with my bank. Thank you for the information.",
                     "conversation_ended": True,
-                    "reason": "Maximum conversation turns reached"
+                    "reason": "Maximum conversation turns reached - loop prevention"
                 },
                 headers={"Access-Control-Allow-Origin": "*"}
             )
