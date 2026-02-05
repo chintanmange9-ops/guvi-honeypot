@@ -1,1 +1,0 @@
-web: python honeypot_server.py
